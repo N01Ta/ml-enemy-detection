@@ -1,0 +1,30 @@
+# ==========================================
+# Rust Subdirectory Ignore Rules
+# ==========================================
+/target/
+*.pdb
+*.exe
+*.obj
+*.ilk
+*.exp
+
+# TensorRT cache & plan files
+/.trt_cache/
+*.engine
+*.plan
+*.timing
+
+# Python & caches
+/__pycache__/
+/.venv*/
+
+# Dynamic libraries
+/*.dll
+/*.lib
+
+# PyTorch weights & ONNX
+/*.pt
+/*.pth
+/*.onnx
+!enemy_detector.onnx
+

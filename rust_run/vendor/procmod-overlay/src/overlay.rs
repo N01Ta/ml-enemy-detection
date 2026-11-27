@@ -1,0 +1,290 @@
+use crate::color::Color;
+use crate::error::{Error, Result};
+use crate::font::GlyphAtlas;
+use crate::input::{InputEvent, InteractionMode};
+use crate::renderer::Renderer;
+use crate::text::{self, TextStyle};
+use crate::vertex::{DrawList, Vertex};
+use crate::window::{OverlayTarget, OverlayWindow};
+use std::f32::consts::PI;
+
+const CIRCLE_SEGMENTS: usize = 32;
+
+/// A transparent, click-through overlay rendered on top of a target window.
+///
+/// Create an overlay by specifying the target window, then draw shapes and text
+/// each frame between `begin_frame` and `end_frame` calls.
+pub struct Overlay {
+    window: OverlayWindow,
+    renderer: Renderer,
+    draw_list: DrawList,
+    font_atlas: GlyphAtlas,
+    in_frame: bool,
+}
+
+impl Overlay {
+    /// Create a new overlay positioned over the target window.
+    pub fn new(target: OverlayTarget) -> Result<Self> {
+        let window = OverlayWindow::create(&target)?;
+        let (w, h) = window.size();
+        let mut renderer = Renderer::new(window.hwnd, w, h)?;
+
+        let font_atlas = GlyphAtlas::new();
+        renderer.upload_font_atlas(&font_atlas)?;
+
+        Ok(Self {
+            window,
+            renderer,
+            draw_list: DrawList::new(),
+            font_atlas,
+            in_frame: false,
+        })
+    }
+
+    /// Returns the HWND of the overlay window.
+    pub fn hwnd(&self) -> isize {
+        self.window.hwnd.0 as isize
+    }
+
+    /// Returns true if the target window is the foreground window.
+    pub fn is_visible(&self) -> bool {
+        self.window.is_target_foreground()
+    }
+
+    /// Returns true if the target window is the foreground window.
+    pub fn is_target_foreground(&self) -> bool {
+        self.window.is_target_foreground()
+    }
+
+    /// Returns true if the overlay window is the foreground window.
+    pub fn is_overlay_foreground(&self) -> bool {
+        self.window.is_overlay_foreground()
+    }
+
+    /// Begin a new frame. Call drawing methods after this, then call `end_frame`.
+    pub fn begin_frame(&mut self) -> Result<()> {
+        if !self.window.pump_messages() {
+            return Err(Error::OverlayClosed);
+        }
+        if !self.window.sync_position() {
+            return Err(Error::TargetWindowLost);
+        }
+
+        let (w, h) = self.window.size();
+        self.renderer.resize(w, h)?;
+
+        if self.renderer.device_lost() {
+            self.renderer.recover()?;
+            self.renderer.upload_font_atlas(&self.font_atlas)?;
+        }
+
+        self.draw_list.clear();
+        self.renderer.begin_frame()?;
+        self.in_frame = true;
+        Ok(())
+    }
+
+    /// Finish the frame and present the rendered content.
+    pub fn end_frame(&mut self) -> Result<()> {
+        if !self.in_frame {
+            return Err(Error::NoActiveFrame);
+        }
+        self.renderer.submit(
+            &self.draw_list.vertices,
+            &self.draw_list.indices,
+            &self.draw_list.commands,
+        )?;
+        self.renderer.end_frame()?;
+        self.in_frame = false;
+        Ok(())
+    }
+
+    /// Current input behavior of the overlay window.
+    pub fn interaction_mode(&self) -> InteractionMode {
+        self.window.interaction_mode()
+    }
+
+    /// Switch between click-through gameplay mode and interactive control mode.
+    pub fn set_interaction_mode(&mut self, mode: InteractionMode) -> Result<()> {
+        self.window.set_interaction_mode(mode)
+    }
+
+    /// Drain input and focus events received since the previous call.
+    pub fn drain_input_events(&mut self) -> Vec<InputEvent> {
+        self.window.drain_events()
+    }
+
+    /// Return and reset the number of events discarded because the input queue was full.
+    pub fn take_dropped_input_event_count(&mut self) -> usize {
+        self.window.take_dropped_event_count()
+    }
+
+    /// Return and reset the number of times the graphics device was lost and rebuilt.
+    ///
+    /// A driver reset, a GPU hang, or an adapter change destroys the device. The overlay
+    /// rebuilds it during the next `begin_frame` and carries on, so drawing code needs no
+    /// changes. The frame in flight when the device went away is lost. This reports how
+    /// often that happened, for applications that log it or reset frame timing.
+    /// [`Error::DeviceLost`] is only returned when the replacement device cannot be built.
+    pub fn take_device_reset_count(&mut self) -> usize {
+        self.renderer.take_resets()
+    }
+
+    /// Close the overlay window.
+    ///
+    /// The next call to `begin_frame` returns [`Error::OverlayClosed`].
+    pub fn close(&mut self) {
+        self.window.close();
+    }
+
+    /// Current overlay client size in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        self.window.size()
+    }
+
+    /// Draw a rectangle outline.
+    pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
+        let t = 1.0;
+        self.line(x, y, x + w, y, t, color);
+        self.line(x + w, y, x + w, y + h, t, color);
+        self.line(x + w, y + h, x, y + h, t, color);
+        self.line(x, y + h, x, y, t, color);
+    }
+
+    /// Draw a filled rectangle.
+    pub fn rect_filled(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
+        let c = color.to_f32_array();
+        self.draw_list.add_solid_quad(
+            Vertex::new(x, y, c),
+            Vertex::new(x + w, y, c),
+            Vertex::new(x + w, y + h, c),
+            Vertex::new(x, y + h, c),
+        );
+    }
+
+    /// Draw a line with the given thickness.
+    pub fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32, color: Color) {
+        self.polyline(&[[x1, y1], [x2, y2]], false, thickness, color);
+    }
+
+    /// Draw an open or closed polyline with centered thickness and butt end caps.
+    ///
+    /// Joins share vertices and use miters limited to four times the half-thickness;
+    /// sharper joins are shortened to that limit. Exact reversals use the outgoing
+    /// segment normal. Self-intersections and reversals may overlap and blend twice.
+    /// Consecutive duplicate points are ignored, as is a repeated closing point for
+    /// closed paths. Two distinct points draw one segment even when closed.
+    /// Fewer than two points, non-finite coordinates, non-positive or non-finite
+    /// thickness, or unrepresentable output coordinates draw nothing.
+    pub fn polyline(&mut self, points: &[[f32; 2]], closed: bool, thickness: f32, color: Color) {
+        crate::geometry::polyline(
+            &mut self.draw_list,
+            points,
+            closed,
+            thickness,
+            color.to_f32_array(),
+        );
+    }
+
+    /// Fill a convex polygon whose boundary vertices are in either winding order.
+    ///
+    /// Consecutive duplicates and a repeated closing point are ignored. Collinear
+    /// boundary vertices are allowed. Fewer than three distinct non-collinear points,
+    /// non-finite coordinates, concave or self-intersecting boundaries draw nothing.
+    /// Convexity validation takes O(n²) time; triangulation takes O(n) space.
+    pub fn convex_polygon_filled(&mut self, points: &[[f32; 2]], color: Color) {
+        crate::geometry::convex_polygon_filled(&mut self.draw_list, points, color.to_f32_array());
+    }
+
+    /// Intersect a clipping rectangle with the current clip and push it on the stack.
+    ///
+    /// Applies to all subsequent shapes, glyph fills, and glyph outlines, not to
+    /// already queued drawing. Intersections are computed before pixel rounding.
+    /// Invalid rectangles clip everything. Every new frame starts without a clip.
+    pub fn push_clip_rect(&mut self, rect: crate::ClipRect) {
+        self.draw_list.push_clip_rect(rect);
+    }
+
+    /// Restore the previous clipping rectangle. An empty stack is a no-op.
+    pub fn pop_clip_rect(&mut self) {
+        self.draw_list.pop_clip_rect();
+    }
+
+    /// Draw a circle outline.
+    pub fn circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color) {
+        let step = 2.0 * PI / CIRCLE_SEGMENTS as f32;
+        for i in 0..CIRCLE_SEGMENTS {
+            let a1 = step * i as f32;
+            let a2 = step * (i + 1) as f32;
+            self.line(
+                cx + a1.cos() * radius,
+                cy + a1.sin() * radius,
+                cx + a2.cos() * radius,
+                cy + a2.sin() * radius,
+                1.0,
+                color,
+            );
+        }
+    }
+
+    /// Draw a filled circle.
+    pub fn circle_filled(&mut self, cx: f32, cy: f32, radius: f32, color: Color) {
+        let c = color.to_f32_array();
+        let step = 2.0 * PI / CIRCLE_SEGMENTS as f32;
+        let center = Vertex::new(cx, cy, c);
+        let mut verts = vec![center];
+        for i in 0..=CIRCLE_SEGMENTS {
+            let angle = step * i as f32;
+            verts.push(Vertex::new(
+                cx + angle.cos() * radius,
+                cy + angle.sin() * radius,
+                c,
+            ));
+        }
+
+        let mut indices = Vec::with_capacity(CIRCLE_SEGMENTS * 3);
+        for i in 1..=CIRCLE_SEGMENTS {
+            indices.push(0);
+            indices.push(i as u32);
+            indices.push((i % CIRCLE_SEGMENTS + 1) as u32);
+        }
+
+        self.draw_list.add_solid_triangles(&verts, &indices);
+    }
+
+    /// Draw left-aligned text at the given position.
+    pub fn text(&mut self, x: f32, y: f32, text: &str, size: f32, color: Color) {
+        self.text_styled(x, y, text, &TextStyle::new(size, color));
+    }
+
+    /// Draw text with an outline, alignment, or both.
+    ///
+    /// Outlined text stays legible over unknown backgrounds. The outline is rasterized
+    /// from the glyph's distance field, so it costs one extra draw call per string
+    /// regardless of length.
+    ///
+    /// ```no_run
+    /// # use procmod_overlay::{Color, Overlay, OverlayTarget, TextAlign, TextStyle};
+    /// # fn main() -> procmod_overlay::Result<()> {
+    /// # let mut overlay = Overlay::new(OverlayTarget::Title("game".into()))?;
+    /// let label = TextStyle::new(16.0, Color::WHITE)
+    ///     .outlined(Color::BLACK, 1.5)
+    ///     .aligned(TextAlign::Center);
+    ///
+    /// overlay.text_styled(320.0, 12.0, "Player1 [100HP]", &label);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn text_styled(&mut self, x: f32, y: f32, text: &str, style: &TextStyle) {
+        text::emit(&mut self.draw_list, &self.font_atlas, x, y, text, style);
+    }
+
+    /// Measure the bounding box of text at the given size.
+    ///
+    /// The result covers the glyphs only. An outline extends past it by its width.
+    pub fn text_bounds(&self, text: &str, size: f32) -> (f32, f32) {
+        let scale = size / crate::font::ATLAS_FONT_SIZE;
+        let (w, h) = self.font_atlas.measure(text);
+        (w * scale, h * scale)
+    }
+}

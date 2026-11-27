@@ -1,0 +1,104 @@
+# ==========================================
+# Rust & Cargo Build Artifacts
+# ==========================================
+target/
+**/target/
+**/*.rs.bk
+*.pdb
+**/*.pdb
+*.exe
+**/*.exe
+*.obj
+**/*.obj
+*.ilk
+**/*.ilk
+*.exp
+**/*.exp
+
+# ==========================================
+# Dynamic Libraries & Heavy Native Binaries
+# ==========================================
+*.dll
+**/*.dll
+*.so
+**/*.so
+*.dylib
+**/*.dylib
+*.lib
+**/*.lib
+
+# ==========================================
+# TensorRT & GPU Engine Caches
+# ==========================================
+.trt_cache/
+**/.trt_cache/
+*.engine
+**/*.engine
+*.plan
+**/*.plan
+*.timing
+**/*.timing
+
+# ==========================================
+# Python & Virtual Environments
+# ==========================================
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+.venv/
+**/.venv/
+.venv*/
+**/.venv*/
+venv/
+**/venv/
+env/
+**/env/
+ENV/
+**/ENV/
+
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+
+# ==========================================
+# Machine Learning Weights & Datasets
+# ==========================================
+apex-2.ndjson
+dataset/*.ndjson
+datasets/
+**/datasets/
+runs/
+**/runs/
+*.pt
+**/*.pt
+*.pth
+**/*.pth
+
+# Ignore all ONNX models except the production enemy_detector.onnx
+*.onnx
+**/*.onnx
+!rust_run/enemy_detector.onnx
+!enemy_detector.onnx
+
+# ==========================================
+# IDE & System Files
+# ==========================================
+.idea/
+**/.idea/
+.vscode/
+**/.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+*.tmp
+
